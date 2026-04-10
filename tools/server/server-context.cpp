@@ -2400,7 +2400,7 @@ private:
                                     SLT_WRN(slot, "%s\n", st1.str().c_str());
                                 }
 
-                                if (pos_min >= pos_min_thold) {
+                                if (pos_min >= pos_min_thold || llama_model_is_recurrent(model) || llama_model_is_hybrid(model)) {
                                     SLT_WRN(slot, "n_past = %d, slot.prompt.tokens.size() = %d, seq_id = %d, pos_min = %d, n_swa = %d\n", n_past, (int) slot.prompt.tokens.size(), slot.id, pos_min, n_swa);
 
                                     // search for a context checkpoint
@@ -2411,6 +2411,9 @@ private:
                                             // guarantee that a checkpoint will result in at least one token being processed [TAG_PROMPT_LOGITS]
                                             LOG_INF("slot %12.*s: id %2d | task %d | Checking checkpoint with [%d, %d] against %d...\n", 12,
                                                 func_name, (slot).id, ((slot).task ? (slot).task->id : -1), cur.pos_min, cur.pos_max, pos_min_thold);
+                                            if (llama_model_is_recurrent(model) || llama_model_is_hybrid(model)) {
+                                                return cur.pos_max <= n_past;
+                                            }
                                             return cur.pos_min < pos_min_thold || cur.pos_min == 0;
                                         }
                                     );
@@ -2434,23 +2437,29 @@ private:
                                     }
 
                                     if (do_reset) {
-                                        SLT_WRN(slot, "forcing full prompt re-processing due to lack of cache data (likely due to SWA or hybrid/recurrent memory, see %s)\n",
-                                                "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
-                                        pos_next = 0;
-                                        n_past = 0;
+                                        if (llama_model_is_recurrent(model) || llama_model_is_hybrid(model)) {
+                                            SLT_WRN(slot, "retaining recurrent state prefix despite lack of exact checkpoint match (n_past = %d)\n", n_past);
+                                        } else {
+                                            SLT_WRN(slot, "forcing full prompt re-processing due to lack of cache data (likely due to SWA or hybrid/recurrent memory, see %s)\n",
+                                                    "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
+                                            pos_next = 0;
+                                            n_past = 0;
+                                        }
                                     }
                                 }
                             }
 
                             {
                                 // erase any checkpoints with pos_max > pos_next
-                                for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end();) {
-                                    const auto & cur = *it;
-                                    if (cur.pos_max > pos_next) {
-                                        SLT_WRN(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_swa = %d, pos_next = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_swa, pos_next, (float) cur.data.size() / 1024 / 1024);
-                                        it = slot.prompt.checkpoints.erase(it);
-                                    } else {
-                                        ++it;
+                                if (!(llama_model_is_recurrent(model) || llama_model_is_hybrid(model))) {
+                                    for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end();) {
+                                        const auto & cur = *it;
+                                        if (cur.pos_max > pos_next) {
+                                            SLT_WRN(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_swa = %d, pos_next = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_swa, pos_next, (float) cur.data.size() / 1024 / 1024);
+                                            it = slot.prompt.checkpoints.erase(it);
+                                        } else {
+                                            ++it;
+                                        }
                                     }
                                 }
                             }
@@ -2646,7 +2655,11 @@ private:
                     const auto pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx), slot.id);
 
                     // no need for empty or small checkpoints
-                    do_checkpoint = do_checkpoint && (pos_min >= 0 && slot.prompt.n_tokens() >= 64);
+                    if (llama_model_is_recurrent(model) || llama_model_is_hybrid(model)) {
+                        do_checkpoint = do_checkpoint && (slot.prompt.n_tokens() >= 64);
+                    } else {
+                        do_checkpoint = do_checkpoint && (pos_min >= 0 && slot.prompt.n_tokens() >= 64);
+                    }
 
                     // do not checkpoint after mtmd chunks
                     do_checkpoint = do_checkpoint && !has_mtmd;
