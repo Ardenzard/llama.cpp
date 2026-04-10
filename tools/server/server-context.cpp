@@ -658,6 +658,24 @@ private:
 
         add_bos_token = llama_vocab_get_add_bos(vocab);
 
+        // iso3/planar KV cache quantizations change the tensor memory layout in ways that
+        // are incompatible with the partial-state checkpoint serialization used for hybrid
+        // and SWA models.  Auto-enable --no-hybrid-checkpoints so prefix caching works.
+        if (!params_base.no_hybrid_checkpoints) {
+            const auto tk = params_base.cache_type_k;
+            const auto tv = params_base.cache_type_v;
+            const bool is_iso_planar =
+                tk == GGML_TYPE_ISO3_0 || tk == GGML_TYPE_ISO4_0 ||
+                tk == GGML_TYPE_PLANAR3_0 || tk == GGML_TYPE_PLANAR4_0 ||
+                tv == GGML_TYPE_ISO3_0 || tv == GGML_TYPE_ISO4_0 ||
+                tv == GGML_TYPE_PLANAR3_0 || tv == GGML_TYPE_PLANAR4_0;
+            if (is_iso_planar) {
+                SRV_WRN("iso3/planar KV cache quantization detected - auto-enabling --no-hybrid-checkpoints "
+                        "for prefix caching compatibility\n");
+                params_base.no_hybrid_checkpoints = true;
+            }
+        }
+
         if (params_base.speculative.has_dft()) {
             SRV_INF("loading draft model '%s'\n", params_base.speculative.mparams_dft.path.c_str());
 
@@ -2396,7 +2414,11 @@ private:
                                     SLT_WRN(slot, "%s\n", st1.str().c_str());
                                 }
 
-                                if (pos_min >= pos_min_thold) {
+                            // When no_hybrid_checkpoints is set (e.g. iso3/planar KV cache), skip the
+                            // checkpoint restore entirely and rely on normal prefix caching instead.
+                            // Without this bypass, checkpoint deserialisation fails (size mismatch due
+                            // to the non-standard tensor layout) and forces n_past = 0 on every turn.
+                            if (pos_min >= pos_min_thold && !params_base.no_hybrid_checkpoints) {
                                     SLT_WRN(slot, "n_past = %d, slot.prompt.tokens.size() = %d, seq_id = %d, pos_min = %d, n_swa = %d\n", n_past, (int) slot.prompt.tokens.size(), slot.id, pos_min, n_swa);
 
                                     // search for a context checkpoint
@@ -2517,7 +2539,11 @@ private:
                     // - the model architecture is marked as recurrent or hybrid
                     //
                     // TODO: try to make this conditional on the context or the memory module, instead of the model type
-                    do_checkpoint = do_checkpoint && (
+                    // no_hybrid_checkpoints: skip checkpoint creation entirely and rely on
+                    // normal prefix caching.  This is required for iso3/planar KV quantization
+                    // (auto-detected at startup) as well as when the user passes
+                    // --no-hybrid-checkpoints explicitly.
+                    do_checkpoint = do_checkpoint && !params_base.no_hybrid_checkpoints && (
                             llama_model_is_recurrent(model) ||
                             llama_model_is_hybrid(model) ||
                             (llama_model_n_swa(model) > 0 && !params_base.swa_full)
