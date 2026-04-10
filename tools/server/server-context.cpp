@@ -2344,7 +2344,11 @@ private:
                             const auto n_swa = std::max(0, llama_model_n_swa(model));
 
                             // the largest pos_min required for a checkpoint to be useful
-                            const auto pos_min_thold = std::max(0, pos_next - n_swa);
+                            auto pos_min_thold = std::max(0, pos_next - n_swa);
+
+                            if (llama_model_is_recurrent(model) || llama_model_is_hybrid(model)) {
+                                pos_min_thold = 0;
+                            }
 
                             if (n_past > 0 && n_past < slot.prompt.n_tokens()) {
                                 const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx), slot.id);
